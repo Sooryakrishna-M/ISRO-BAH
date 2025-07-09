@@ -1,187 +1,170 @@
 import numpy as np
-import random
+import matplotlib.pyplot as plt
+from matplotlib.colors import ListedColormap
+import random # For initial fire points and probabilities
 
-class ForestFireCA:
-    def __init__(self, grid_size, initial_ignition_points, fuel_map, wind_data, slope_data,
-                 base_flammability_factor=0.5, wind_effect_factor=0.1, slope_effect_factor=0.05,
-                 ignition_threshold=0.6):
-        """
-        Initializes the Forest Fire Cellular Automata simulation.
+# --- 1. Define Cell States ---
+UNBURNED = 0
+BURNING = 1
+BURNED = 2
+OBSTACLE = 3 # Optional: for water, rocks, etc.
 
-        Args:
-            grid_size (tuple): (rows, cols) representing the dimensions of the grid.
-            initial_ignition_points (list): A list of (row, col) tuples for initial burning cells.
-            fuel_map (np.ndarray): A 2D array representing fuel types/vegetation (0-1, higher is more flammable).
-            wind_data (np.ndarray): A 2D array representing wind direction and strength.
-                                     Can be complex (e.g., tuples for (magnitude, direction_radians))
-                                     or simplified (e.g., integer codes for N, NE, E, etc.).
-                                     For this example, let's assume it's a 2D array where each element
-                                     is an integer representing a simplified wind direction (0: no wind, 1: N, 2: NE, etc.).
-                                     Or even simpler, a constant global wind direction for now.
-            slope_data (np.ndarray): A 2D array representing the slope (e.g., angle in degrees or a classification).
-                                     Positive values indicate uphill, negative downhill.
-            base_flammability_factor (float): Multiplier for base flammability.
-            wind_effect_factor (float): Multiplier for the wind's influence on ignition probability.
-            slope_effect_factor (float): Multiplier for the slope's influence on ignition probability.
-            ignition_threshold (float): The probability threshold for an unburned cell to ignite.
-        """
+# --- 2. Define Colors for Visualization ---
+# Custom colormap for visualization
+colors = ['#1a9850', '#d73027', '#a6a6a6', '#4575b4'] # Green (unburned), Red (burning), Gray (burned), Blue (obstacle)
+cmap = ListedColormap(colors)
+norm = plt.Normalize(vmin=0, vmax=3) # Normalize for our 0-3 states
+
+class FireCA:
+    def __init__(self, grid_size=(50, 50), initial_fire_points=1, obstacle_density=0.05,
+                 burning_duration=1, prob_spread=0.8, prob_self_extinguish=0.0):
         self.rows, self.cols = grid_size
-        self.grid = np.zeros(grid_size, dtype=int)  # 0: Unburned, 1: Burning, 2: Burned
+        self.grid = np.full(grid_size, UNBURNED, dtype=int)
+        self.burning_timers = np.zeros(grid_size, dtype=int) # To track how long a cell has been burning
 
-        # Initialize ignition points
-        for r, c in initial_ignition_points:
-            if 0 <= r < self.rows and 0 <= c < self.cols:
-                self.grid[r, c] = 1  # Set to burning
+        self.burning_duration = burning_duration # How many steps a cell stays BURNING before becoming BURNED
+        self.prob_spread = prob_spread # Probability an unburned cell catches fire from a burning neighbor
+        self.prob_self_extinguish = prob_self_extinguish # Probability a burning cell extinguishes on its own
 
-        self.fuel_map = fuel_map
-        self.wind_data = wind_data
-        self.slope_data = slope_data
+        self._initialize_grid(initial_fire_points, obstacle_density)
 
-        self.base_flammability_factor = base_flammability_factor
-        self.wind_effect_factor = wind_effect_factor
-        self.slope_effect_factor = slope_effect_factor
-        self.ignition_threshold = ignition_threshold
+        # Initialize wind_data correctly as a 3D array for 2D vectors per cell
+        # Each cell (r, c) will store a vector [x_component, y_component]
+        # Example: [0, 1] could mean wind blowing from South to North
+        # You would later define how these components translate to direction and speed
+        self.wind_data = np.full((self.rows, self.cols, 2), [0, 1], dtype=int)
+        # Note: In a real scenario, you'd load or generate a more complex wind map
+        # where each cell might have a different wind vector.
 
-        # For simplified wind: Let's assume a global wind direction for now.
-        # Example: (dr, dc) for wind vector. (0, 1) for East, (-1, 0) for North.
-        # This will need to be refined based on actual wind data format.
-        self.global_wind_direction = (0, 1)  # Example: Wind blowing towards East
+        # Example of how you might add a basic fuel map (optional, for future enhancement)
+        # self.fuel_map = np.full(grid_size, 'forest', dtype='U10') # e.g., 'grass', 'forest', 'shrub'
+        # self.fuel_map[self.grid == OBSTACLE] = 'none' # Obstacles have no fuel
 
-    def _calculate_ignition_probability(self, r, c, neighbor_r, neighbor_c):
-        """
-        Calculates the ignition probability for an unburned cell (r, c)
-        based on a burning neighbor (neighbor_r, neighbor_c).
-        """
-        probability = 0.0
+    def _initialize_grid(self, initial_fire_points, obstacle_density):
+        # Add obstacles
+        num_obstacles = int(self.rows * self.cols * obstacle_density)
+        # Create a list of all possible (row, col) indices
+        all_indices = [(r, c) for r in range(self.rows) for c in range(self.cols)]
+        # Randomly sample unique indices for obstacles
+        obstacle_coords = random.sample(all_indices, num_obstacles)
 
-        # 1. Base Flammability
-        probability += self.fuel_map[r, c] * self.base_flammability_factor
+        for r, c in obstacle_coords:
+            self.grid[r, c] = OBSTACLE
 
-        # 2. Wind Effect
-        # Simplified wind effect: If wind blows from burning neighbor towards current cell
-        # (This is a very basic implementation and would need more sophisticated wind modeling)
-        wind_dr, wind_dc = self.global_wind_direction # Assuming global wind for now
+        # Set initial fire points (ensure they are not obstacles)
+        fire_set = 0
+        while fire_set < initial_fire_points:
+            r, c = random.randint(0, self.rows - 1), random.randint(0, self.cols - 1)
+            if self.grid[r, c] == UNBURNED:
+                self.grid[r, c] = BURNING
+                self.burning_timers[r, c] = self.burning_duration
+                fire_set += 1
 
-        # Vector from neighbor to current cell
-        vec_to_current_dr = r - neighbor_r
-        vec_to_current_dc = c - neighbor_c
+    def _get_neighbors(self, r, c):
+        """Returns the states of the Moore neighborhood (8 neighbors) as a list of (state, nr, nc) tuples."""
+        neighbors = []
+        for dr in [-1, 0, 1]:
+            for dc in [-1, 0, 1]:
+                if dr == 0 and dc == 0:
+                    continue # Skip the cell itself
+                nr, nc = r + dr, c + dc
+                if 0 <= nr < self.rows and 0 <= nc < self.cols:
+                    neighbors.append((self.grid[nr, nc], nr, nc))
+        return neighbors
 
-        # If wind is blowing roughly in the same direction as the vector from neighbor to current cell
-        # This is a very rough approximation. A more accurate model would use dot products with wind vectors.
-        if (wind_dr == vec_to_current_dr and wind_dc == vec_to_current_dc) or \
-           (wind_dr == -vec_to_current_dr and wind_dc == -vec_to_current_dc): # This means wind is blowing towards the neighbor
-            probability += self.wind_effect_factor
-        
-        # More sophisticated wind: check if wind is blowing *from* neighbor *to* (r,c)
-        # If wind vector points roughly from (neighbor_r, neighbor_c) to (r, c)
-        # This requires more complex wind data (magnitude and direction for each cell)
-        # For simplicity, if wind is generally aligned with the direction of spread from burning neighbor, increase probability.
-        # For a truly accurate wind model, you'd convert wind_data (e.g., angle) to a vector
-        # and calculate the dot product with the vector from (neighbor_r, neighbor_c) to (r, c).
-        # Dot product > 0 suggests wind is aiding spread in that direction.
-
-        # 3. Slope Effect
-        # If current cell (r, c) is uphill from burning neighbor (neighbor_r, neighbor_c)
-        # This assumes slope_data provides elevation or slope direction.
-        # For simplicity, let's assume slope_data[r,c] > slope_data[neighbor_r, neighbor_c] means uphill.
-        if self.slope_data[r, c] > self.slope_data[neighbor_r, neighbor_c]:
-            probability += self.slope_effect_factor * abs(self.slope_data[r, c] - self.slope_data[neighbor_r, neighbor_c])
-        elif self.slope_data[r, c] < self.slope_data[neighbor_r, neighbor_c]:
-            # Fire spreads slower downhill, so we could subtract a smaller factor or do nothing
-            probability -= self.slope_effect_factor * 0.5 * abs(self.slope_data[r, c] - self.slope_data[neighbor_r, neighbor_c])
-
-
-        return min(1.0, max(0.0, probability)) # Ensure probability is between 0 and 1
-
-    def step(self):
-        """
-        Executes one time step of the simulation.
-        Returns True if there are still burning cells, False otherwise.
-        """
-        new_grid = self.grid.copy()
-        burning_cells_count = 0
+    def update(self):
+        """Applies the CA rules for one time step."""
+        new_grid = np.copy(self.grid) # Create a copy to store new states (synchronous update)
+        new_burning_timers = np.copy(self.burning_timers)
 
         for r in range(self.rows):
             for c in range(self.cols):
                 current_state = self.grid[r, c]
 
-                if current_state == 1:  # If cell is burning
-                    new_grid[r, c] = 2  # It transitions to burned
-                elif current_state == 0:  # If cell is unburned
-                    # Check neighbors for burning cells
-                    burning_neighbor_found = False
-                    for dr in [-1, 0, 1]:
-                        for dc in [-1, 0, 1]:
-                            if dr == 0 and dc == 0:
-                                continue  # Skip self
+                if current_state == UNBURNED:
+                    neighbors_info = self._get_neighbors(r, c)
+                    # Check if any neighbor is BURNING
+                    burning_neighbors_present = any(state == BURNING for state, _, _ in neighbors_info)
 
-                            neighbor_r, neighbor_c = r + dr, c + dc
+                    if burning_neighbors_present:
+                        # Rule: Unburned to Burning
+                        # You would add complex environmental factors here, e.g.:
+                        # - wind_vector_at_cell = self.wind_data[r, c]
+                        # - fuel_type_at_cell = self.fuel_map[r, c] (if you added it)
+                        # - Adjust self.prob_spread based on these factors and neighbor direction
+                        effective_prob_spread = self.prob_spread # Starting with base probability
 
-                            # Boundary Conditions: Ensure neighbor is within grid bounds
-                            if 0 <= neighbor_r < self.rows and 0 <= neighbor_c < self.cols:
-                                if self.grid[neighbor_r, neighbor_c] == 1:  # If neighbor is burning
-                                    burning_neighbor_found = True
-                                    # Calculate ignition probability
-                                    prob = self._calculate_ignition_probability(r, c, neighbor_r, neighbor_c)
+                        # Example of simple wind influence (wind from South to North, favors North spread)
+                        # This would need to be much more sophisticated for true realism
+                        # For now, just a placeholder to show where you'd integrate it
+                        # if self.wind_data[r, c][1] > 0: # If there's a positive y-component (blowing north)
+                        #     # If a neighbor directly to the north is burning, increase prob
+                        #     for state, nr, nc in neighbors_info:
+                        #         if state == BURNING and nr < r: # Neighbor is above (North)
+                        #             effective_prob_spread *= 1.2 # Boost
+                        #         elif state == BURNING and nr > r: # Neighbor is below (South)
+                        #             effective_prob_spread *= 0.8 # Reduce
 
-                                    if random.random() < prob:  # If random check passes
-                                        new_grid[r, c] = 1  # Cell ignites
-                                        burning_cells_count += 1
-                                        break  # No need to check other neighbors if already ignited
-                        if burning_neighbor_found:
-                            break
+
+                        if random.random() < effective_prob_spread:
+                            new_grid[r, c] = BURNING
+                            new_burning_timers[r, c] = self.burning_duration # Start timer
+
+                elif current_state == BURNING:
+                    # Rule: Burning to Burned (based on timer)
+                    new_burning_timers[r, c] -= 1
+                    if new_burning_timers[r, c] <= 0:
+                        new_grid[r, c] = BURNED
+                    # Optional: Self-extinguish probability (e.g., if conditions are unfavorable)
+                    elif random.random() < self.prob_self_extinguish:
+                        new_grid[r, c] = BURNED # Changed to BURNED directly if self-extinguishing
+                        new_burning_timers[r, c] = 0
+
+                # Rule: Burned remains Burned
+                # Rule: Obstacle remains Obstacle
+                # No change needed for BURNED or OBSTACLE cells unless specific rules apply
 
         self.grid = new_grid
-        return burning_cells_count > 0
+        self.burning_timers = new_burning_timers
+        return np.any(self.grid == BURNING) # Return True if any cell is still burning
 
-    def get_grid(self):
-        """Returns the current state of the simulation grid."""
-        return self.grid
+    def visualize(self, ax, title="Fire Simulation"):
+        ax.imshow(self.grid, cmap=cmap, norm=norm)
+        ax.set_title(title)
+        ax.set_xticks([])
+        ax.set_yticks([])
 
-# --- Example Usage ---
+# --- Main Simulation Loop ---
 if __name__ == "__main__":
-    grid_rows = 50
-    grid_cols = 50
-    grid_size = (grid_rows, grid_cols)
+    grid_size = (100, 100)
+    initial_fire_points = 3
+    obstacle_density = 0.08 # Percentage of land that is obstacles
+    burning_duration = 2 # Cells burn for 2 time steps
+    prob_spread = 0.7 # 70% chance to spread
+    prob_self_extinguish = 0.01 # Small chance a burning cell self-extinguishes
 
-    # Example: Create dummy data for fuel, wind, and slope
-    fuel_map = np.random.rand(grid_rows, grid_cols)  # Random flammability between 0 and 1
-    
-    # Simplified wind: Assume a constant global wind blowing from West to East (towards positive column direction)
-    # This is (dr, dc) = (0, 1)
-    wind_data = np.full(grid_size, (0, 1), dtype=object) # Not really used per cell in current simplified model
-    
-    # Slope data: Create a synthetic slope, e.g., higher values towards the top-right
-    slope_data = np.zeros(grid_size)
-    for r in range(grid_rows):
-        for c in range(grid_cols):
-            slope_data[r, c] = (r + c) / (grid_rows + grid_cols) # Slope increasing diagonally
+    fire_sim = FireCA(grid_size, initial_fire_points, obstacle_density,
+                      burning_duration, prob_spread, prob_self_extinguish)
 
-    # Initial ignition points (from a hypothetical prediction map)
-    # Let's say top 3 predicted points
-    initial_ignition_points = [(25, 25), (20, 30), (30, 20)]
+    # Setup plot for animation
+    fig, ax = plt.subplots(figsize=(8, 8))
+    fire_sim.visualize(ax, title="Initial State")
+    plt.show(block=False) # Non-blocking show to allow updates
 
-    # Initialize the simulation
-    fire_sim = ForestFireCA(grid_size, initial_ignition_points, fuel_map, wind_data, slope_data,
-                            base_flammability_factor=0.3, # Lower base flammability
-                            wind_effect_factor=0.2,      # Moderate wind effect
-                            slope_effect_factor=0.1,     # Moderate slope effect
-                            ignition_threshold=0.5)      # Probability threshold for ignition
+    print("Starting simulation...")
+    time_step = 0
+    while True:
+        time_step += 1
+        burning_active = fire_sim.update()
+        fire_sim.visualize(ax, title=f"Time Step {time_step}")
+        fig.canvas.draw_idle() # Update the plot efficiently
+        plt.pause(0.1) # Pause to see the animation
 
-    print("Initial Grid State:")
-    print(fire_sim.get_grid())
-
-    # Run the simulation for a few steps
-    num_steps = 20
-    for i in range(num_steps):
-        print(f"\n--- Step {i+1} ---")
-        still_burning = fire_sim.step()
-        print(f"Current Grid State (Showing only a portion):")
-        print(fire_sim.get_grid()[20:35, 20:35]) # Print a central portion for readability
-
-        if not still_burning:
-            print("No more burning cells. Fire extinguished.")
+        if not burning_active:
+            print(f"Fire extinguished at time step {time_step}.")
+            break
+        if time_step > 200: # Max time steps to prevent infinite loop
+            print("Maximum time steps reached.")
             break
 
-    print("\nFinal Grid State:")
-    print(fire_sim.get_grid())
+    plt.show() # Keep the final plot open
